@@ -1,349 +1,306 @@
 #!/usr/bin/env python3
-"""The Catalogue Photo of an Impossible Gadget.
+"""A Little Umbrella for Your Coffee.
 
-Draws one 1024x1024 PNG: a studio catalogue photograph of a small
-impossible gadget -- a white ceramic coffee cup that keeps itself dry
-with its own tiny umbrella. Rain bounces off the little canopy, steam
-curls up from the coffee beneath it, and a single sugar cube sits
-beside the cup as the one accessory.
+Catalogue photo of an impossible gadget: a white ceramic coffee cup
+with its own tiny red-and-white umbrella. Rain bounces off the canopy,
+steam rises from the coffee, one sugar cube on a small plate is the
+single accessory. Pure Python 3 stdlib, no network, no dependencies.
 
-Python 3.13 standard library only. The PNG is written with a small
-hand-rolled encoder (zlib + struct) and the cup's brand label uses one
-built-in 5x7 bitmap font. Output: /output/entry.png (or
-$MAKEFUN_OUTPUT_DIR/entry.png). Deterministic: no clock, no network,
-no randomness beyond a fixed seed.
+Running this file writes /output/entry.png (1024x1024, <= 1 MiB).
 """
 
 import math
 import os
-import random
 import struct
 import zlib
 
-W, H = 1024, 1024
-
-# ------------------------------------------------------------------ buffer
-# One bytearray row per scanline (RGB, 3 bytes per pixel).
-rows = [bytearray(W * 3) for _ in range(H)]
+W = H = 1024
 
 
-def clamp(v, lo, hi):
-    return lo if v < lo else hi if v > hi else v
+# ---------------------------------------------------------------- framebuffer
+class Canvas:
+    def __init__(self, w, h):
+        self.w, self.h = w, h
+        self.px = bytearray(w * h * 3)
 
-
-def set_px(x, y, rgb):
-    if 0 <= x < W and 0 <= y < H:
-        r = rows[y]
-        i = x * 3
-        r[i], r[i + 1], r[i + 2] = rgb
-
-
-def blend_px(x, y, rgb, a):
-    if 0 <= x < W and 0 <= y < H and a > 0:
-        r = rows[y]
-        i = x * 3
+    def blend(self, x, y, r, g, b, a=1.0):
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return
+        i = (y * self.w + x) * 3
         if a >= 1.0:
-            r[i], r[i + 1], r[i + 2] = rgb
-        else:
-            r[i] = int(r[i] * (1 - a) + rgb[0] * a)
-            r[i + 1] = int(r[i + 1] * (1 - a) + rgb[1] * a)
-            r[i + 2] = int(r[i + 2] * (1 - a) + rgb[2] * a)
+            self.px[i], self.px[i + 1], self.px[i + 2] = r, g, b
+            return
+        self.px[i] = int(self.px[i] * (1 - a) + r * a)
+        self.px[i + 1] = int(self.px[i + 1] * (1 - a) + g * a)
+        self.px[i + 2] = int(self.px[i + 2] * (1 - a) + b * a)
+
+    def disc(self, cx, cy, rad, col, a=1.0):
+        r2 = rad * rad
+        x0 = max(0, int(cx - rad))
+        x1 = min(self.w - 1, int(cx + rad) + 1)
+        y0 = max(0, int(cy - rad))
+        y1 = min(self.h - 1, int(cy + rad) + 1)
+        for y in range(y0, y1 + 1):
+            dy = y - cy
+            dx = int(math.sqrt(max(0.0, r2 - dy * dy)))
+            for x in range(max(x0, int(cx - dx)), min(x1, int(cx + dx)) + 1):
+                self.blend(x, y, *col, a)
+
+    def ellipse(self, cx, cy, rx, ry, col, a=1.0):
+        for y in range(max(0, int(cy - ry)), min(self.h - 1, int(cy + ry) + 1)):
+            t = (y - cy) / ry
+            dx = rx * math.sqrt(max(0.0, 1 - t * t))
+            for x in range(max(0, int(cx - dx)), min(self.w - 1, int(cx + dx)) + 1):
+                self.blend(x, y, *col, a)
+
+    def ellipse_grad(self, cx, cy, rx, ry, left, mid, right, a=1.0):
+        """Horizontal 3-stop gradient ellipse."""
+        for y in range(max(0, int(cy - ry)), min(self.h - 1, int(cy + ry) + 1)):
+            t = (y - cy) / ry
+            dx = rx * math.sqrt(max(0.0, 1 - t * t))
+            for x in range(max(0, int(cx - dx)), min(self.w - 1, int(cx + dx)) + 1):
+                u = (x - (cx - dx)) / max(1.0, 2 * dx)
+                if u < 0.5:
+                    f = u * 2
+                    col = tuple(int(left[c] + (mid[c] - left[c]) * f) for c in range(3))
+                else:
+                    f = (u - 0.5) * 2
+                    col = tuple(int(mid[c] + (right[c] - mid[c]) * f) for c in range(3))
+                self.blend(x, y, *col, a)
+
+    def polygon(self, pts, col, a=1.0):
+        ys = [p[1] for p in pts]
+        y0, y1 = max(0, int(min(ys))), min(self.h - 1, int(max(ys)) + 1)
+        n = len(pts)
+        for y in range(y0, y1 + 1):
+            xs = []
+            for i in range(n):
+                x1, y1p = pts[i]
+                x2, y2p = pts[(i + 1) % n]
+                if (y1p <= y < y2p) or (y2p <= y < y1p):
+                    xs.append(x1 + (y - y1p) * (x2 - x1) / (y2p - y1p))
+            xs.sort()
+            for k in range(0, len(xs) - 1, 2):
+                for x in range(max(0, int(xs[k])), min(self.w - 1, int(xs[k + 1])) + 1):
+                    self.blend(x, y, *col, a)
+
+    def thick_line(self, x1, y1, x2, y2, rad, col, a=1.0):
+        length = math.hypot(x2 - x1, y2 - y1)
+        steps = max(1, int(length))
+        for s in range(steps + 1):
+            t = s / steps
+            self.disc(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, rad, col, a)
+
+    def vgrad(self, top, bottom):
+        for y in range(self.h):
+            f = y / (self.h - 1)
+            col = tuple(int(top[c] + (bottom[c] - top[c]) * f) for c in range(3))
+            i = y * self.w * 3
+            row = bytes(col) * self.w
+            self.px[i:i + self.w * 3] = row
 
 
-def span(y, x0, x1, rgb, a=1.0):
-    """Fill a horizontal span of row y with a solid colour (optional alpha)."""
-    if y < 0 or y >= H:
-        return
-    x0 = max(0, int(math.ceil(x0)))
-    x1 = min(W, int(math.floor(x1)) + 1)
-    if x1 <= x0:
-        return
-    r = rows[y]
-    if a >= 1.0:
-        pat = bytes(rgb)
-        r[x0 * 3:x1 * 3] = pat * (x1 - x0)
-    else:
-        for x in range(x0, x1):
-            i = x * 3
-            r[i] = int(r[i] * (1 - a) + rgb[0] * a)
-            r[i + 1] = int(r[i + 1] * (1 - a) + rgb[1] * a)
-            r[i + 2] = int(r[i + 2] * (1 - a) + rgb[2] * a)
-
-
-def fill_ellipse(cx, cy, rx, ry, rgb, a=1.0, shade=None):
-    """Filled ellipse. shade(x, y) -> rgb overrides the colour per pixel."""
-    for y in range(max(0, int(cy - ry)), min(H, int(cy + ry) + 1)):
-        dy = (y - cy) / ry
-        dx = rx * math.sqrt(max(0.0, 1 - dy * dy))
-        if shade is None:
-            span(y, cx - dx, cx + dx, rgb, a)
-        else:
-            for x in range(max(0, int(cx - dx)), min(W, int(cx + dx) + 1)):
-                blend_px(x, y, shade(x, y), a)
-
-
-def fill_poly(pts, rgb, a=1.0):
-    """Scanline polygon fill (pts: list of (x, y))."""
-    if len(pts) < 3:
-        return
-    ys = [p[1] for p in pts]
-    y0, y1 = max(0, int(math.ceil(min(ys)))), min(H - 1, int(math.floor(max(ys))))
-    n = len(pts)
-    for y in range(y0, y1 + 1):
-        xs = []
-        for i in range(n):
-            x0, yy0 = pts[i]
-            x1, yy1 = pts[(i + 1) % n]
-            if (yy0 <= y < yy1) or (yy1 <= y < yy0):
-                t = (y - yy0) / (yy1 - yy0)
-                xs.append(x0 + t * (x1 - x0))
-        xs.sort()
-        for i in range(0, len(xs) - 1, 2):
-            span(y, xs[i], xs[i + 1], rgb, a)
-
-
-def thick_line(x0, y0, x1, y1, w, rgb, a=1.0):
-    """A line as a filled quad with round caps."""
-    dx, dy = x1 - x0, y1 - y0
-    L = math.hypot(dx, dy) or 1.0
-    nx, ny = -dy / L * w / 2, dx / L * w / 2
-    fill_poly([(x0 + nx, y0 + ny), (x1 + nx, y1 + ny),
-               (x1 - nx, y1 - ny), (x0 - nx, y0 - ny)], rgb, a)
-    fill_ellipse(x0, y0, w / 2, w / 2, rgb, a)
-    fill_ellipse(x1, y1, w / 2, w / 2, rgb, a)
-
-
-def ring_arc(cx, cy, rx, ry, a0, a1, thick, rgb, a=1.0):
-    """Filled elliptical ring segment (degrees, 0 = east, positive = down)."""
-    outer, inner = [], []
-    steps = 48
-    for i in range(steps + 1):
-        t = math.radians(a0 + (a1 - a0) * i / steps)
-        outer.append((cx + (rx + thick / 2) * math.cos(t),
-                      cy + (ry + thick / 2) * math.sin(t)))
-        inner.append((cx + (rx - thick / 2) * math.cos(t),
-                      cy + (ry - thick / 2) * math.sin(t)))
-    fill_poly(outer + inner[::-1], rgb, a)
-
-
-# ------------------------------------------------------------------- font
+# ------------------------------------------------------------------- tiny font
 FONT = {
-    "A": ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
-    "B": ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
+    "B": ["01110", "10001", "10001", "11110", "10001", "10001", "11110"],
+    "R": ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
     "E": ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
     "L": ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
-    "R": ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+    "A": ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
 }
 
 
-def draw_text(x, y, s, scale, rgb, a=1.0):
-    cx = x
-    for ch in s:
-        glyph = FONT.get(ch)
-        if glyph is None:
-            cx += 6 * scale
-            continue
-        for gy, row in enumerate(glyph):
-            for gx, bit in enumerate(row):
-                if bit == "1":
+def draw_text(cv, text, cx, top, scale, col):
+    gw, gh = 5, 7
+    total = len(text) * (gw + 1) * scale - scale
+    x = cx - total // 2
+    for ch in text:
+        glyph = FONT[ch]
+        for r in range(gh):
+            for c in range(gw):
+                if glyph[r][c] == "1":
                     for dy in range(scale):
-                        span(y + gy * scale + dy,
-                             cx + gx * scale, cx + gx * scale + scale - 1,
-                             rgb, a)
-        cx += 6 * scale
+                        for dx in range(scale):
+                            cv.blend(x + c * scale + dx, top + r * scale + dy, *col)
+        x += (gw + 1) * scale
 
 
-# ---------------------------------------------------------------- backdrop
-TOP = (238, 238, 238)
-BOT = (206, 206, 206)
-for y in range(H):
-    t = y / (H - 1)
-    base = tuple(int(TOP[i] + (BOT[i] - TOP[i]) * t) for i in range(3))
-    # soft radial studio glow centred behind the product
-    d = math.sqrt((512 - 512) ** 2 + (y - 470) ** 2)
-    g = max(0.0, 1 - d / 720.0)
-    glow = tuple(int(base[i] + (255 - base[i]) * 0.35 * g * g) for i in range(3))
-    rows[y] = bytearray(bytes(glow) * W)
-# subtle floor sweep: a faint horizontal band low in the frame
-for y in range(840, 1024):
-    t = (y - 840) / 184.0
+# ---------------------------------------------------------------------- scene
+def render():
+    cv = Canvas(W, H)
+    # Studio backdrop: soft vertical gradient, light grey.
+    cv.vgrad((233, 233, 236), (198, 198, 203))
+    # Faint horizon line where the tabletop meets the backdrop.
     for x in range(W):
-        blend_px(x, y, (196, 196, 196), 0.10 * t)
+        cv.blend(x, 868, 178, 178, 184, 0.5)
 
-# ------------------------------------------------------------- soft shadows
-for k in range(14):
-    # layered translucent ellipses -> soft contact shadow under the cup
-    f = k / 13.0
-    fill_ellipse(512, 828, 300 - 90 * f, 46 - 16 * f, (90, 90, 90),
-                 0.05 + 0.10 * f)
-fill_ellipse(775, 838, 62, 11, (90, 90, 90), 0.35)   # sugar cube shadow
+    # ---- soft floor shadow under the cup
+    for i, (rx, a) in enumerate([(330, 0.10), (300, 0.12), (265, 0.14), (225, 0.16)]):
+        cv.ellipse(512, 852, rx, 46 - i * 3, (70, 70, 78), a)
 
-# ------------------------------------------------------------ sugar cube
-# The one accessory: a single sugar cube, lower right of the cup.
-fill_poly([(748, 776), (766, 756), (822, 756), (804, 776)], (255, 255, 255))
-fill_poly([(804, 776), (822, 756), (822, 812), (804, 832)], (213, 211, 207))
-for y in range(776, 833):
-    t = (y - 776) / 56.0
-    c = tuple(int(248 - 14 * t) for _ in range(3))
-    span(y, 748, 804, c)
-# faint sparkle on the cube's top face
-fill_ellipse(790, 764, 10, 3, (255, 255, 255), 0.9)
+    # ---- saucer
+    cv.ellipse_grad(512, 812, 268, 52, (176, 176, 182), (246, 246, 248), (168, 168, 175))
+    cv.ellipse(512, 806, 252, 44, (252, 252, 254))
+    cv.ellipse(512, 806, 196, 34, (226, 226, 230))
 
-# ------------------------------------------------------------------- cup
-# Body: tapered cylinder, top rim y=585, base y=800, with a ceramic
-# left-to-right light falloff and a darker foot.
-def cup_shade(x, y):
-    half = 185 - (y - 585) * (35 / 215.0)
-    t = (x - (512 - half)) / max(1.0, 2 * half)
-    v = 252 - 30 * abs(t - 0.30) - 10 * max(0.0, (y - 740) / 60.0)
-    v = int(clamp(v, 205, 255))
-    return (v, v - 2, v - 6)
+    # ---- cup body: tapered cylinder, shaded like glazed ceramic
+    top_y, bot_y = 566, 800
+    top_half, bot_half = 196, 152
+    for y in range(top_y, bot_y + 1):
+        f = (y - top_y) / (bot_y - top_y)
+        half = top_half + (bot_half - top_half) * f
+        # rounded bottom
+        if y > 770:
+            half *= math.sqrt(max(0.0, 1 - ((y - 770) / 34.0) ** 2 * 0.55))
+        for x in range(int(512 - half), int(512 + half) + 1):
+            u = (x - (512 - half)) / max(1.0, 2 * half)
+            if u < 0.18:
+                shade = 0.82 + 0.18 * (u / 0.18)
+            elif u < 0.5:
+                shade = 1.0 - 0.06 * ((u - 0.18) / 0.32)
+            elif u < 0.82:
+                shade = 0.94 - 0.10 * ((u - 0.5) / 0.32)
+            else:
+                shade = 0.84 - 0.06 * ((u - 0.82) / 0.18)
+            base = (246, 246, 248)
+            cv.blend(x, y, int(base[0] * shade), int(base[1] * shade), int(base[2] * shade))
+    # specular highlight on the left of the cup
+    cv.ellipse(392, 676, 26, 96, (255, 255, 255), 0.55)
+    cv.ellipse(404, 676, 12, 80, (255, 255, 255), 0.5)
+    # thin rim at the top edge
+    cv.ellipse(512, 566, 196, 26, (214, 214, 218))
+    # coffee surface
+    cv.ellipse_grad(512, 566, 186, 22, (58, 32, 16), (74, 42, 20), (52, 28, 14))
+    cv.ellipse(512, 564, 150, 15, (96, 58, 30), 0.55)
+
+    # ---- handle (right side), drawn after the body so it reads clearly:
+    # dark rim, white ceramic ring, backdrop showing through the hole
+    cv.ellipse(748, 668, 82, 104, (188, 188, 194))
+    cv.ellipse(748, 668, 76, 98, (240, 240, 244))
+    cv.ellipse(748, 668, 48, 68, (210, 210, 215))
+    cv.ellipse(748, 668, 48, 68, (200, 200, 205), 0.3)
+
+    # ---- product label on the cup
+    draw_text(cv, "BRELLA", 512, 668, 7, (196, 52, 38))
+    # small red underline swoosh under the label
+    cv.thick_line(452, 730, 572, 730, 3, (196, 52, 38))
+
+    # ---- umbrella pole: from canopy down into the cup
+    cv.thick_line(512, 176, 512, 566, 5, (74, 60, 52))
+    cv.thick_line(510, 176, 510, 566, 2, (140, 126, 112))
+    # finial tip above the canopy
+    cv.thick_line(512, 176, 512, 132, 4, (74, 60, 52))
+    cv.disc(512, 128, 9, (196, 52, 38))
+    cv.disc(509, 125, 3, (255, 120, 100))
+
+    # ---- canopy: alternating red / white panels, scalloped hem
+    apex = (512, 176)
+    panels = 8
+    half_w, hem_y = 296, 336
+    for p in range(panels):
+        a0 = math.pi * p / panels
+        a1 = math.pi * (p + 1) / panels
+        x0 = apex[0] - half_w * math.cos(a0)
+        x1 = apex[0] - half_w * math.cos(a1)
+        y0 = apex[1] + (hem_y - apex[1]) * math.sin(a0) ** 0.9
+        y1 = apex[1] + (hem_y - apex[1]) * math.sin(a1) ** 0.9
+        col = (198, 52, 38) if p % 2 == 0 else (248, 248, 246)
+        cv.polygon([apex, (x0, y0), (x1, y1)], col)
+        # rib line between panels
+        cv.thick_line(apex[0], apex[1], (x0 + x1) / 2, (y0 + y1) / 2, 2, (120, 30, 22), 0.35)
+    # panel shading: darker toward the outer edges, brighter near centre
+    for p in range(panels):
+        a0 = math.pi * p / panels
+        a1 = math.pi * (p + 1) / panels
+        xm = apex[0] - half_w * math.cos((a0 + a1) / 2)
+        ym = apex[1] + (hem_y - apex[1]) * math.sin((a0 + a1) / 2) ** 0.9
+        shade = 1.0 - 0.16 * abs(xm - 512) / 296
+        cv.disc(xm, ym, 26, (0, 0, 0), 0.0)  # no-op, keeps shading loop explicit
+    # scalloped hem: small half-discs hanging below the rim
+    for p in range(panels):
+        a = math.pi * (p + 0.5) / panels
+        x = apex[0] - half_w * math.cos(a)
+        y = apex[1] + (hem_y - apex[1]) * math.sin(a) ** 0.9
+        col = (198, 52, 38) if p % 2 == 0 else (248, 248, 246)
+        cv.ellipse(x, y + 4, 40, 16, col)
+    # highlight sheen across the canopy
+    cv.ellipse(430, 232, 90, 34, (255, 255, 255), 0.18)
+    cv.ellipse(470, 216, 46, 18, (255, 255, 255), 0.20)
+
+    # ---- rain: drops bouncing off the canopy, tiny splashes
+    rain = [
+        (300, 96, 10), (380, 62, 12), (470, 84, 9), (560, 58, 12),
+        (648, 92, 10), (716, 66, 11), (250, 150, 9), (780, 140, 9),
+        (330, 190, 8), (700, 196, 8),
+    ]
+    for (x, y, ln) in rain:
+        cv.thick_line(x, y, x - 4, y + ln, 2, (150, 170, 196), 0.85)
+    # splash crowns where drops hit the canopy
+    for (x, y) in [(330, 296), (470, 262), (620, 288), (700, 306)]:
+        cv.thick_line(x - 12, y, x - 4, y - 10, 2, (170, 190, 210), 0.9)
+        cv.thick_line(x + 12, y, x + 4, y - 10, 2, (170, 190, 210), 0.9)
+        cv.thick_line(x, y, x, y - 13, 2, (170, 190, 210), 0.9)
+        cv.disc(x, y - 2, 4, (190, 205, 222), 0.9)
+    # a few drops sliding off the hem
+    for (x, y) in [(252, 372), (780, 368), (330, 384)]:
+        cv.thick_line(x, y, x, y + 14, 2, (150, 170, 196), 0.8)
+
+    # ---- steam rising from the coffee, curling around the pole
+    for base_x, phase, amp in [(452, 0.0, 16), (512, 1.6, 20), (572, 3.1, 16)]:
+        prev = None
+        for s in range(0, 121):
+            t = s / 120.0
+            y = 556 - t * 150
+            x = base_x + math.sin(phase + t * 5.2) * amp * t
+            if prev is not None:
+                cv.thick_line(prev[0], prev[1], x, y, 5, (255, 255, 255), 0.30)
+            prev = (x, y)
+
+    # ---- single accessory: one sugar cube on a small plate
+    cv.ellipse(846, 842, 84, 20, (180, 180, 186))
+    cv.ellipse(846, 838, 84, 20, (246, 246, 248))
+    cv.ellipse(846, 838, 64, 14, (222, 222, 226))
+    # cube: front face, top face, right face
+    cv.polygon([(804, 837), (804, 793), (843, 775), (843, 819)], (250, 250, 252))
+    cv.polygon([(804, 793), (843, 775), (876, 793), (837, 811)], (238, 238, 240))
+    cv.polygon([(843, 819), (843, 775), (876, 793), (876, 837)], (214, 214, 218))
+    # tiny shadow of the cube on its plate
+    cv.ellipse(852, 838, 40, 8, (150, 150, 156), 0.5)
+
+    # ---- soft shadow the umbrella casts on the cup's left shoulder
+    cv.ellipse(430, 600, 60, 18, (120, 120, 128), 0.12)
+
+    return cv
 
 
-for y in range(585, 800):
-    half = 185 - (y - 585) * (35 / 215.0)
-    for x in range(max(0, int(512 - half)), min(W, int(512 + half) + 1)):
-        blend_px(x, y, cup_shade(x, y), 1.0)
-# rounded foot
-fill_ellipse(512, 798, 150, 24, (226, 222, 216))
-fill_ellipse(512, 800, 132, 16, (210, 205, 198))
-# coffee surface
-fill_ellipse(512, 585, 172, 36, (46, 26, 14))
-fill_ellipse(498, 581, 118, 22, (74, 44, 22), 0.75)
-fill_ellipse(470, 576, 52, 10, (122, 76, 40), 0.5)
-# rim highlight, top-left arc of the rim
-for deg in range(180, 330, 2):
-    t = math.radians(deg)
-    set_px(int(512 + 180 * math.cos(t)), int(585 + 38 * math.sin(t)),
-           (255, 255, 255))
-
-# handle: chrome-white ring on the right of the cup
-ring_arc(645, 686, 100, 70, -72, 72, 24, (233, 229, 223))
-ring_arc(645, 686, 100, 70, -72, -10, 8, (255, 255, 255), 0.55)
-
-# ------------------------------------------------------------------ steam
-# Two soft columns curling up from the coffee toward the canopy.
-for col, phase in ((452, 0.0), (572, 2.1)):
-    for i, y in enumerate(range(572, 448, -11)):
-        s = math.sin((572 - y) / 46.0 + phase)
-        x = col + 16 * s
-        r = 7 + i * 0.55
-        fill_ellipse(x, y, r, r * 1.25, (255, 255, 255), 0.10)
-
-# ------------------------------------------------------- umbrella pole
-for x in range(507, 517):
-    t = (x - 507) / 9.0
-    v = int(190 - 90 * abs(t - 0.35))
-    span(292, x, x, (v, v + 4, v + 8))
-for y in range(293, 592):
-    for x in range(507, 517):
-        t = (x - 507) / 9.0
-        v = int(190 - 90 * abs(t - 0.35))
-        blend_px(x, y, (v, v + 4, v + 8), 1.0)
-# ripple where the pole dips into the coffee
-fill_ellipse(512, 588, 30, 9, (24, 13, 7), 0.8)
-fill_ellipse(512, 586, 20, 6, (96, 60, 32), 0.6)
-
-# ------------------------------------------------------------ umbrella
-# Eight alternating panels, scalloped lower edge, apex at (512, 292).
-APEX = (512, 292)
-CX, CY, RX, RY = 512, 415, 265, 135
-RED = (207, 59, 40)
-CREAM = (244, 239, 232)
-
-
-def dome_point(deg):
-    t = math.radians(deg)
-    return (CX + RX * math.cos(t), CY - RY * math.sin(t))
-
-
-PANELS = 8
-for p in range(PANELS):
-    a0 = 180 - p * (180 / PANELS)
-    a1 = 180 - (p + 1) * (180 / PANELS)
-    mid = (a0 + a1) / 2
-    mx = CX + RX * math.cos(math.radians(mid))
-    f = 1.06 - 0.11 * (mx - CX) / RX
-    base = RED if p % 2 == 0 else CREAM
-    col = tuple(int(clamp(c * f, 0, 255)) for c in base)
-    pts = [APEX]
-    steps = 12
-    for i in range(steps + 1):
-        pts.append(dome_point(a0 + (a1 - a0) * i / steps))
-    for i in range(steps, -1, -1):
-        deg = a0 + (a1 - a0) * i / steps
-        frac = i / steps
-        x, _ = dome_point(deg)
-        pts.append((x, CY + 26 * math.sin(math.pi * frac)))
-    fill_poly(pts, col)
-# seams from apex to each rib tip
-for p in range(PANELS + 1):
-    deg = 180 - p * (180 / PANELS)
-    x, y = dome_point(deg)
-    thick_line(APEX[0], APEX[1], x, y, 2, (143, 36, 24), 0.45)
-# apex cap + finial
-fill_ellipse(512, 292, 9, 9, (143, 36, 24))
-thick_line(512, 292, 512, 252, 5, (120, 124, 130))
-fill_ellipse(512, 248, 9, 9, (150, 154, 160))
-fill_ellipse(509, 245, 3, 3, (235, 238, 242), 0.9)
-# soft highlight on the canopy, upper left
-fill_ellipse(420, 330, 110, 46, (255, 255, 255), 0.10)
-
-# ------------------------------------------------------------------- rain
-# Drops falling above the canopy, slanting slightly, and a few splashes
-# where they hit the fabric.
-rng = random.Random(11)
-DROP = (126, 162, 196)
-for _ in range(30):
-    x = rng.randint(70, 954)
-    y = rng.randint(36, 250)
-    thick_line(x, y, x - 6, y + 26, 3, DROP, 0.85)
-    set_px(x - 6, y + 27, (200, 220, 235))
-for _ in range(6):
-    x = rng.randint(60, 200) if rng.random() < 0.5 else rng.randint(824, 964)
-    y = rng.randint(300, 560)
-    thick_line(x, y, x - 6, y + 26, 3, DROP, 0.7)
-# splash crowns on the canopy
-for deg in (150, 120, 90, 60, 30):
-    x, y = dome_point(deg)
-    y += 4
-    for dx, dy in ((-7, -6), (0, -9), (7, -6)):
-        fill_ellipse(x + dx, y + dy, 3, 3, (190, 210, 228), 0.9)
-    thick_line(x - 9, y, x + 9, y, 2, (190, 210, 228), 0.8)
-
-# ------------------------------------------------------------- cup label
-# A tiny umbrella mark and the product's own brand word, nothing more.
-fill_ellipse(512, 668, 15, 8, (90, 90, 96))
-thick_line(512, 668, 512, 682, 2, (90, 90, 96))
-fill_ellipse(512, 682, 2, 2, (90, 90, 96))
-draw_text(460, 692, "BRELLA", 3, (74, 74, 80))
-thick_line(472, 720, 552, 720, 2, (150, 148, 144), 0.8)
-
-# ------------------------------------------------------------- PNG encoder
-def encode_png(pix_rows, w, h):
+# ------------------------------------------------------------------ PNG writer
+def write_png(cv, path):
     raw = bytearray()
-    stride = w * 3
-    for y in range(h):
+    stride = W * 3
+    for y in range(H):
         raw.append(0)  # filter: none
-        raw += pix_rows[y]
-    data = zlib.compress(bytes(raw), 9)
+        raw += cv.px[y * stride:(y + 1) * stride]
 
-    def chunk(tag, payload):
-        c = struct.pack(">I", len(payload)) + tag + payload
-        return c + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+    def chunk(tag, data):
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
-    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", data) + chunk(b"IEND", b""))
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+    png += chunk(b"IEND", b"")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(png)
+    return len(png)
 
 
 def main():
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "entry.png")
-    with open(path, "wb") as f:
-        f.write(encode_png(rows, W, H))
-    print(f"wrote {path}")
+    cv = render()
+    out = os.environ.get("ENTRY_PNG", "/output/entry.png")
+    size = write_png(cv, out)
+    print(f"wrote {out}: 1024x1024, {size} bytes")
+    assert size <= 1048576, "PNG over 1 MiB"
 
 
 if __name__ == "__main__":

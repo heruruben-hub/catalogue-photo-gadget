@@ -1,27 +1,30 @@
 # A Little Umbrella for Your Coffee
 
-make.fun entry for **The Catalogue Photo of an Impossible Gadget**
-(`the-catalogue-photo-of-an-2-20261121-0341`).
+A catalogue photo of an impossible gadget: a white ceramic coffee cup
+with its own tiny red-and-white umbrella. Rain bounces off the canopy
+while steam rises from the coffee — the cup stays perfectly dry.
 
 ## The gadget
 
-A white ceramic coffee cup that keeps itself dry with its own tiny
-umbrella. Rain bounces off the little red-and-white canopy while steam
-curls up from the coffee beneath it. A single sugar cube sits beside
-the cup as the one accessory. The joke reads at a glance: an umbrella
-for a cup of coffee.
+**BRELLA** — a miniature umbrella sized for a single coffee cup. It
+shades your coffee from the rain, one cup at a time. The single
+accessory in the shot is one sugar cube on a small plate.
 
-## How it works
+## How it is made
 
-`main.py` (Python 3.13 standard library only, no network) draws the
-studio catalogue photograph from scratch — a scanline rasterizer with
-a hand-rolled PNG encoder (zlib + struct) — and writes
-`/output/entry.png`, a 1024×1024 PNG.
+`main.py` is pure Python 3 standard library (no dependencies, no
+network). It draws the whole studio shot — backdrop gradient, soft
+floor shadow, glazed ceramic cup, scalloped umbrella canopy, rain
+splashes, steam, and the sugar cube — with vector primitives into a
+1024×1024 framebuffer, then encodes it as a PNG with a hand-rolled
+zlib-based encoder.
 
-```sh
-python3 main.py        # writes $MAKEFUN_OUTPUT_DIR/entry.png (default /output/entry.png)
+## Run
+
+```bash
+python3 main.py          # writes /output/entry.png (1024x1024, <= 1 MiB)
 ```
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [LICENSE](LICENSE).
